@@ -58,6 +58,7 @@ test("rotates when the log file exceeds LOG_MAX_BYTES", () => {
   assert.ok(fs.existsSync(logFile + ".1"), "rotated .1 exists");
   const sz = fs.statSync(logFile).size;
   assert.ok(sz <= 1500, `current file should be small after rotation, was ${sz}`);
+  assert.ok(!fs.existsSync(logFile + ".4"), ".4 should not exist (cap is 3)");
 });
 
 test("falls back to console.error if log file path is unwritable", () => {
@@ -75,6 +76,10 @@ test("falls back to console.error if log file path is unwritable", () => {
     console.error = origErr;
   }
   assert.ok(captured.length >= 1, "console.error called as fallback");
+  const sawBoom = captured.some((args) =>
+    args.some((a) => typeof a === "string" && a.includes("boom"))
+  );
+  assert.ok(sawBoom, "expected console.error fallback to log the boom message");
 });
 
 test("filePath() returns the resolved log file path", () => {

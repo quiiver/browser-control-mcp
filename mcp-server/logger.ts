@@ -52,16 +52,17 @@ function rotateIfNeeded() {
   }
   if (size < LOG_MAX_BYTES) return;
 
-  for (let i = LOG_MAX_FILES - 1; i >= 1; i--) {
+  for (let i = LOG_MAX_FILES; i >= 1; i--) {
     const src = `${LOG_FILE}.${i}`;
-    const dst = `${LOG_FILE}.${i + 1}`;
-    if (fs.existsSync(src)) {
-      try {
-        if (i + 1 > LOG_MAX_FILES) fs.unlinkSync(src);
-        else fs.renameSync(src, dst);
-      } catch {
-        // ignore — best-effort rotation
+    if (!fs.existsSync(src)) continue;
+    try {
+      if (i === LOG_MAX_FILES) {
+        fs.unlinkSync(src);
+      } else {
+        fs.renameSync(src, `${LOG_FILE}.${i + 1}`);
       }
+    } catch {
+      // ignore — best-effort rotation
     }
   }
   try {
@@ -73,8 +74,15 @@ function rotateIfNeeded() {
 
 function write(level: LogLevel, msg: string, meta?: object) {
   if (LEVEL_RANK[level] > LEVEL_RANK[LOG_LEVEL]) return;
-  const entry = { ts: new Date().toISOString(), level, msg, ...(meta || {}) };
-  const line = JSON.stringify(entry) + "\n";
+  let line: string;
+  try {
+    const entry = { ts: new Date().toISOString(), level, msg, ...(meta || {}) };
+    line = JSON.stringify(entry) + "\n";
+  } catch (err) {
+    // meta couldn't be serialized (e.g., circular ref); log a degraded entry
+    const entry = { ts: new Date().toISOString(), level, msg, metaError: String(err) };
+    line = JSON.stringify(entry) + "\n";
+  }
 
   if (!fileUsable) {
     console.error(line.trimEnd());
