@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
+    "test": "tsc --noEmit && node --test --import tsx logger.test.ts",
     "pack-dxt": "npx @anthropic-ai/dxt pack"
   },
   "license": "MIT",
@@ -21,6 +22,7 @@
   },
   "devDependencies": {
     "@types/ws": "^8.18.0",
+    "tsx": "^4.21.0",
     "typescript": "^5.8.2"
   }
 }
