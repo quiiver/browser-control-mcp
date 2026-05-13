@@ -8,11 +8,21 @@ import type {
   ServerMessageRequest,
   ExtensionError,
 } from "@browser-control-mcp/common";
-import { isPortInUse } from "./util";
 import * as crypto from "crypto";
+import { log } from "./logger";
+import { recordConnection, recordDisconnect, recordError, recordPort } from "./health";
 
 const WS_DEFAULT_PORT = 8089;
-const EXTENSION_RESPONSE_TIMEOUT_MS = 1000;
+const DEFAULT_RESPONSE_TIMEOUT_MS = 5000;
+const MAX_BIND_ATTEMPTS = 5;
+const BIND_BACKOFFS_MS = [1000, 2000, 4000, 8000, 16000, 30000];
+
+function responseTimeoutMs(): number {
+  const v = process.env.EXTENSION_RESPONSE_TIMEOUT_MS;
+  if (!v) return DEFAULT_RESPONSE_TIMEOUT_MS;
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_RESPONSE_TIMEOUT_MS;
+}
 
 interface ExtensionRequestResolver<T extends ExtensionMessage["resource"]> {
   resource: T;
@@ -24,9 +34,8 @@ export class BrowserAPI {
   private ws: WebSocket | null = null;
   private wsServer: WebSocket.Server | null = null;
   private sharedSecret: string | null = null;
+  private port: number = WS_DEFAULT_PORT;
 
-  // Map to persist the request to the extension. It maps the request correlationId
-  // to a resolver, fulfulling a promise created when sending a message to the extension.
   private extensionRequestMap: Map<
     string,
     ExtensionRequestResolver<ExtensionMessage["resource"]>
@@ -40,44 +49,87 @@ export class BrowserAPI {
       );
     }
     this.sharedSecret = secret;
+    this.port = port;
+    recordPort(port);
+  }
 
-    if (await isPortInUse(port)) {
-      throw new Error(
-        `Configured port ${port} is already in use. Please configure a different port.`
-      );
-    }
-
-    // Unless running in a container, bind to localhost only
+  async start() {
     const host = process.env.CONTAINERIZED ? "0.0.0.0" : "localhost";
 
-    this.wsServer = new WebSocket.Server({
-      host,
-      port,
+    for (let attempt = 0; attempt < MAX_BIND_ATTEMPTS; attempt++) {
+      try {
+        await this.bind(host, this.port);
+        log.info("websocket server listening", { host, port: this.port });
+        return;
+      } catch (err) {
+        recordError(err);
+        const isTransient = (err as NodeJS.ErrnoException)?.code === "EADDRINUSE";
+        const isLast = attempt === MAX_BIND_ATTEMPTS - 1;
+        if (!isTransient || isLast) {
+          log.error("websocket bind failed permanently", {
+            attempt: attempt + 1,
+            err: String(err),
+          });
+          throw err;
+        }
+        const backoff = BIND_BACKOFFS_MS[Math.min(attempt, BIND_BACKOFFS_MS.length - 1)];
+        log.warn("websocket bind failed, retrying", {
+          attempt: attempt + 1,
+          backoffMs: backoff,
+        });
+        await new Promise((r) => setTimeout(r, backoff));
+      }
+    }
+  }
+
+  private bind(host: string, port: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const server = new WebSocket.Server({ host, port });
+      const onError = (err: Error) => {
+        server.removeListener("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        server.removeListener("error", onError);
+        this.wsServer = server;
+        this.attachServerHandlers(server, port);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
     });
+  }
 
-    console.error(`Starting WebSocket server on ${host}:${port}`);
-    this.wsServer.on("connection", async (connection) => {
+  private attachServerHandlers(server: WebSocket.Server, port: number) {
+    server.on("connection", (connection) => {
       this.ws = connection;
+      recordConnection(port);
 
-      console.error("WebSocket connection established on port", port);
+      connection.on("close", () => {
+        if (this.ws === connection) this.ws = null;
+        recordDisconnect();
+      });
+      connection.on("error", (err) => recordError(err));
 
-      this.ws.on("message", (message) => {
-        const decoded = JSON.parse(message.toString());
-        if (isErrorMessage(decoded)) {
-          this.handleExtensionError(decoded);
-          return;
+      connection.on("message", (message) => {
+        try {
+          const decoded = JSON.parse(message.toString());
+          if (isErrorMessage(decoded)) {
+            this.handleExtensionError(decoded);
+            return;
+          }
+          const signature = this.createSignature(JSON.stringify(decoded.payload));
+          if (signature !== decoded.signature) {
+            log.warn("invalid message signature from extension");
+            return;
+          }
+          this.handleDecodedExtensionMessage(decoded.payload);
+        } catch (err) {
+          recordError(err);
         }
-        const signature = this.createSignature(JSON.stringify(decoded.payload));
-        if (signature !== decoded.signature) {
-          console.error("Invalid message signature");
-          return;
-        }
-        this.handleDecodedExtensionMessage(decoded.payload);
       });
     });
-    this.wsServer.on("error", (error) => {
-      console.error("WebSocket server error:", error);
-    });
+    server.on("error", (err) => recordError(err));
   }
 
   close() {
@@ -198,7 +250,6 @@ export class BrowserAPI {
       signature: signature,
     };
 
-    // Send the signed message to the extension
     this.ws.send(JSON.stringify(signedMessage));
 
     return correlationId;
@@ -206,20 +257,31 @@ export class BrowserAPI {
 
   private handleDecodedExtensionMessage(decoded: ExtensionMessage) {
     const { correlationId } = decoded;
-    const { resolve, resource } = this.extensionRequestMap.get(correlationId)!;
-    if (resource !== decoded.resource) {
-      console.error("Resource mismatch:", resource, decoded.resource);
+    const entry = this.extensionRequestMap.get(correlationId);
+    if (!entry) {
+      log.warn("received extension message with unknown correlationId", { correlationId });
+      return;
+    }
+    if (entry.resource !== decoded.resource) {
+      log.warn("resource mismatch on extension reply", {
+        expected: entry.resource,
+        got: decoded.resource,
+      });
       return;
     }
     this.extensionRequestMap.delete(correlationId);
-    resolve(decoded);
+    entry.resolve(decoded);
   }
 
   private handleExtensionError(decoded: ExtensionError) {
     const { correlationId, errorMessage } = decoded;
-    const { reject } = this.extensionRequestMap.get(correlationId)!;
+    const entry = this.extensionRequestMap.get(correlationId);
+    if (!entry) {
+      log.warn("received extension error with unknown correlationId", { correlationId });
+      return;
+    }
     this.extensionRequestMap.delete(correlationId);
-    reject(errorMessage);
+    entry.reject(errorMessage);
   }
 
   private async waitForResponse<T extends ExtensionMessage["resource"]>(
@@ -236,7 +298,7 @@ export class BrowserAPI {
         setTimeout(() => {
           this.extensionRequestMap.delete(correlationId);
           reject("Timed out waiting for response");
-        }, EXTENSION_RESPONSE_TIMEOUT_MS);
+        }, responseTimeoutMs());
       }
     );
   }
