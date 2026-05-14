@@ -5,15 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as crypto from "node:crypto";
-import {
-  PROTOCOL_VERSION,
-  computeHelloAuth,
-  type HelloFrame,
-  type HelloAckFrame,
-  type ErrorFrame,
-  type RequestFrame,
-  type ResponseFrame,
+import type {
+  HelloFrame,
+  HelloAckFrame,
+  ErrorFrame,
+  RequestFrame,
+  ResponseFrame,
 } from "@browser-control-mcp/common";
+import { PROTOCOL_VERSION, computeHelloAuth } from "./daemon-handshake";
 import { IpcServer } from "./ipc-server";
 
 function tmpSocketPath(): string {

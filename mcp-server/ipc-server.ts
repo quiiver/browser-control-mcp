@@ -1,17 +1,16 @@
 import * as net from "node:net";
 import * as fs from "node:fs";
-import {
-  type IpcClientToDaemon,
-  type HelloAckFrame,
-  type ErrorFrame,
-  type ResponseFrame,
-  type StatusResponseFrame,
-  type RequestFrame,
-  type HelloFrame,
-  type DaemonStatus,
-  PROTOCOL_VERSION,
-  verifyHelloAuth,
+import type {
+  IpcClientToDaemon,
+  HelloAckFrame,
+  ErrorFrame,
+  ResponseFrame,
+  StatusResponseFrame,
+  RequestFrame,
+  HelloFrame,
+  DaemonStatus,
 } from "@browser-control-mcp/common";
+import { PROTOCOL_VERSION, verifyHelloAuth } from "./daemon-handshake";
 import { log } from "./logger";
 
 export interface IpcServerEvents {

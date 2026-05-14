@@ -1,8 +1,5 @@
-import * as crypto from "crypto";
 import type { ServerMessage } from "./server-messages";
 import type { ExtensionMessage } from "./extension-messages";
-
-export const PROTOCOL_VERSION = 1;
 
 export interface HelloFrame {
   type: "hello";
@@ -68,25 +65,3 @@ export type IpcDaemonToClient =
   | ResponseFrame
   | StatusResponseFrame
   | ErrorFrame;
-
-export interface HelloAuthPayload {
-  protocolVersion: number;
-  clientPid: number;
-  clientVersion: string;
-  nonce: string;
-}
-
-export function computeHelloAuth(secret: string, payload: HelloAuthPayload): string {
-  const canonical = JSON.stringify(payload);
-  return crypto.createHmac("sha256", secret).update(canonical).digest("hex");
-}
-
-export function verifyHelloAuth(secret: string, frame: HelloFrame): boolean {
-  const expected = computeHelloAuth(secret, {
-    protocolVersion: frame.protocolVersion,
-    clientPid: frame.clientPid,
-    clientVersion: frame.clientVersion,
-    nonce: frame.nonce,
-  });
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(frame.auth));
-}
