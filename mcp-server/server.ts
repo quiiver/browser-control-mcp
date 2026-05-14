@@ -2,14 +2,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { BrowserAPI } from "./browser-api";
+import { log } from "./logger";
+import { health, recordError } from "./health";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 
 dayjs.extend(relativeTime);
 
+process.on("uncaughtException", (err) => {
+  recordError(err);
+});
+process.on("unhandledRejection", (reason) => {
+  recordError(reason);
+});
+
+log.info("mcp-server starting", { version: "1.6.0", pid: process.pid });
+
 const mcpServer = new McpServer({
   name: "BrowserControl",
-  version: "1.5.1",
+  version: "1.6.0",
 });
 
 mcpServer.tool(
@@ -55,17 +66,14 @@ mcpServer.tool(
     limit: z.number().default(100).describe("Maximum number of tabs to return (default: 100, max: 500)"),
   },
   async ({ offset, limit }) => {
-    // Validate and cap the limit
     const effectiveLimit = Math.min(Math.max(1, limit), 500);
 
     const openTabs = await browserApi.getTabList();
     const totalTabs = openTabs.length;
 
-    // Apply pagination
     const paginatedTabs = openTabs.slice(offset, offset + effectiveLimit);
     const hasMore = offset + effectiveLimit < totalTabs;
 
-    // Add pagination info as the first content item
     const paginationInfo = {
       type: "text" as const,
       text: `Showing tabs ${offset + 1}-${offset + paginatedTabs.length} of ${totalTabs} total tabs${hasMore ? ` (use offset=${offset + effectiveLimit} to see more)` : ''}`,
@@ -74,7 +82,7 @@ mcpServer.tool(
     const tabContent = paginatedTabs.map((tab) => {
       let lastAccessed = "unknown";
       if (tab.lastAccessed) {
-        lastAccessed = dayjs(tab.lastAccessed).fromNow(); // LLM-friendly time ago
+        lastAccessed = dayjs(tab.lastAccessed).fromNow();
       }
       return {
         type: "text" as const,
@@ -101,7 +109,7 @@ mcpServer.tool(
         content: browserHistory.map((item) => {
           let lastVisited = "unknown";
           if (item.lastVisitTime) {
-            lastVisited = dayjs(item.lastVisitTime).fromNow(); // LLM-friendly time ago
+            lastVisited = dayjs(item.lastVisitTime).fromNow();
           }
           return {
             type: "text",
@@ -110,8 +118,6 @@ mcpServer.tool(
         }),
       };
     } else {
-      // If nothing was found for the search query, hint the AI to list
-      // all the recent history items instead.
       const hint = searchQuery ? "Try without a searchQuery" : "";
       return { content: [{ type: "text", text: `No history found. ${hint}` }] };
     }
@@ -121,7 +127,7 @@ mcpServer.tool(
 mcpServer.tool(
   "get-tab-web-content",
   `
-    Get the full text content of the webpage and the list of links in the webpage, by tab ID. 
+    Get the full text content of the webpage and the list of links in the webpage, by tab ID.
     Use "offset" only for larger documents when the first call was truncated and if you require more content in order to assist the user.
   `,
   { tabId: z.number(), offset: z.number().default(0) },
@@ -129,12 +135,9 @@ mcpServer.tool(
     const content = await browserApi.getTabContent(tabId, offset);
     let links: { type: "text"; text: string }[] = [];
     if (offset === 0) {
-      // Only include the links if offset is 0 (default value). Otherwise, we can
-      // assume this is not the first call. Adding the links again would be redundant.
       links = content.links.map((link: { text: string; url: string }) => {
         return {
           type: "text",
-
           text: `Link text: ${link.text}, Link URL: ${link.url}`,
         };
       });
@@ -143,9 +146,6 @@ mcpServer.tool(
     let text = content.fullText;
     let hint: { type: "text"; text: string }[] = [];
     if (content.isTruncated || offset > 0) {
-      // If the content is truncated, add a "tip" suggesting
-      // that another tool, search in page, can be used to
-      // discover additional data.
       const rangeString = `${offset}-${offset + text.length}`;
       hint = [
         {
@@ -233,19 +233,36 @@ mcpServer.tool(
   }
 );
 
+mcpServer.tool(
+  "browser-control-status",
+  "Get the health/status of the browser-control MCP server. Use this when other browser-control tools are failing, when you suspect the Firefox extension is disconnected, or when the user asks whether the browser integration is working. Returns ws connection state, port, last connection/disconnect/error timestamps, and the log file path.",
+  {},
+  async () => {
+    return {
+      content: [{ type: "text", text: JSON.stringify(health, null, 2) }],
+    };
+  }
+);
+
 const browserApi = new BrowserAPI();
-browserApi.init().catch((err) => {
-  console.error("Browser API init error", err);
-  process.exit(1);
-});
+browserApi
+  .init()
+  .then(() => browserApi.start())
+  .catch((err) => {
+    recordError(err);
+    log.error("fatal init failure, exiting", { err: String(err) });
+    process.exit(1);
+  });
 
 const transport = new StdioServerTransport();
 mcpServer.connect(transport).catch((err) => {
-  console.error("MCP Server connection error", err);
+  recordError(err);
+  log.error("mcp transport connect failed, exiting", { err: String(err) });
   process.exit(1);
 });
 
 process.stdin.on("close", () => {
+  log.info("stdin closed; shutting down");
   browserApi.close();
   mcpServer.close();
   process.exit(0);
