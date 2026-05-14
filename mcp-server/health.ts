@@ -1,22 +1,19 @@
 import { log } from "./logger";
+import { resolveSocketPath } from "./socket-path";
 
-export interface Health {
+export interface ClientHealth {
   startedAt: string;
-  wsConnected: boolean;
-  port: number | null;
-  lastConnectionAt: string | null;
-  lastDisconnectAt: string | null;
+  daemonReachable: boolean;
+  daemonSocketPath: string;
   lastErrorAt: string | null;
   lastErrorMessage: string | null;
   logFilePath: string;
 }
 
-export const health: Health = {
+export const health: ClientHealth = {
   startedAt: new Date().toISOString(),
-  wsConnected: false,
-  port: null,
-  lastConnectionAt: null,
-  lastDisconnectAt: null,
+  daemonReachable: false,
+  daemonSocketPath: resolveSocketPath(),
   lastErrorAt: null,
   lastErrorMessage: null,
   logFilePath: log.filePath(),
@@ -40,19 +37,6 @@ export function recordError(err: unknown): void {
   log.error(msg, stack ? { stack } : undefined);
 }
 
-export function recordConnection(port: number): void {
-  health.wsConnected = true;
-  health.port = port;
-  health.lastConnectionAt = new Date().toISOString();
-  log.info("websocket connection established", { port });
-}
-
-export function recordDisconnect(): void {
-  health.wsConnected = false;
-  health.lastDisconnectAt = new Date().toISOString();
-  log.info("websocket connection closed");
-}
-
-export function recordPort(port: number): void {
-  health.port = port;
+export function recordDaemonReachable(reachable: boolean): void {
+  health.daemonReachable = reachable;
 }

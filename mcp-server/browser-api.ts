@@ -64,9 +64,6 @@ export class BrowserAPI {
     await this.client.connect();
   }
 
-  // Deprecated — kept for one task only to avoid breaking server.ts before T9 rewrites it.
-  async start(): Promise<void> {}
-
   close(): void {
     this.client?.close();
   }

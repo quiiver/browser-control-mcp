@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { BrowserAPI } from "./browser-api";
 import { log } from "./logger";
-import { health, recordError } from "./health";
+import { health, recordError, recordDaemonReachable } from "./health";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 
@@ -16,11 +16,11 @@ process.on("unhandledRejection", (reason) => {
   recordError(reason);
 });
 
-log.info("mcp-server starting", { version: "1.6.0", pid: process.pid });
+log.info("mcp-server starting", { version: "1.7.0", pid: process.pid });
 
 const mcpServer = new McpServer({
   name: "BrowserControl",
-  version: "1.6.0",
+  version: "1.7.0",
 });
 
 mcpServer.tool(
@@ -235,24 +235,36 @@ mcpServer.tool(
 
 mcpServer.tool(
   "browser-control-status",
-  "Get the health/status of the browser-control MCP server. Use this when other browser-control tools are failing, when you suspect the Firefox extension is disconnected, or when the user asks whether the browser integration is working. Returns ws connection state, port, last connection/disconnect/error timestamps, and the log file path.",
+  "Get the health/status of the browser-control MCP server and its singleton daemon. Use this when other browser-control tools are failing, when you suspect the Firefox extension is disconnected, or when the user asks whether the browser integration is working. Returns the per-Claude client state plus the daemon's ws-connection state, port, last connection/disconnect/error timestamps, log file paths, and PID.",
   {},
   async () => {
+    let daemon: object = { reachable: false };
+    try {
+      const fetched = await browserApi.status();
+      if (fetched) {
+        daemon = fetched;
+        recordDaemonReachable(true);
+      } else {
+        recordDaemonReachable(false);
+      }
+    } catch (err) {
+      recordError(err);
+      recordDaemonReachable(false);
+      daemon = { reachable: false, error: String(err) };
+    }
+    const combined = { client: health, daemon };
     return {
-      content: [{ type: "text", text: JSON.stringify(health, null, 2) }],
+      content: [{ type: "text", text: JSON.stringify(combined, null, 2) }],
     };
   }
 );
 
 const browserApi = new BrowserAPI();
-browserApi
-  .init()
-  .then(() => browserApi.start())
-  .catch((err) => {
-    recordError(err);
-    log.error("fatal init failure, exiting", { err: String(err) });
-    process.exit(1);
-  });
+browserApi.init().catch((err) => {
+  recordError(err);
+  log.error("fatal init failure, exiting", { err: String(err) });
+  process.exit(1);
+});
 
 const transport = new StdioServerTransport();
 mcpServer.connect(transport).catch((err) => {
